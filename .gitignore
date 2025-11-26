@@ -1,0 +1,6 @@
+__pycache__/
+checkpoint/
+critics/
+POGO-W/
+wandb/
+.txt
