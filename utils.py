@@ -1,4 +1,4 @@
-# File: utils.py
+# File: pogogo/utils.py
 
 import numpy as np
 import torch
