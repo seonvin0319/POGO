@@ -1,0 +1,73 @@
+# POGO 실험 설정 파일
+# 통합 학습: 여러 actor를 순차적으로 학습
+
+common:
+  max_timesteps: 1000000
+  eval_freq: 10000
+  seeds: [0, 1, 2, 3, 4]
+  split_ratio: 0.5
+
+# Sinkhorn 설정
+# blur는 action 스케일(max_action)에 민감하므로, 실제 사용 시 blur * max_action으로 해석됨
+# 예: blur=0.05, max_action=1.0 → effective_blur=0.05
+#     blur=0.05, max_action=2.0 → effective_blur=0.10
+sinkhorn:
+  K: 4                    # num_samples: 각 state당 샘플 수
+  blur: 0.05              # epsilon: Sinkhorn regularization (action 스케일 기준)
+  iters: null             # max_iter: 최대 반복 횟수 (null이면 기본값 사용)
+  stopThr: null           # stopping threshold (null이면 기본값 사용)
+  backend: "tensorized"   # "tensorized", "online", "auto"
+
+environments:
+  hopper:
+    medium:
+      w2_weights: [0.2, 0.2]
+      learning_rate: 3e-4
+    medium-replay:
+      w2_weights: [0.2, 0.2]
+      learning_rate: 3e-4
+    medium-expert:
+      w2_weights: [0.2, 0.2]
+      learning_rate: 3e-4
+  
+  halfcheetah:
+    medium:
+      w2_weights: [0.2, 0.2]
+      learning_rate: 3e-4
+    medium-replay:
+      w2_weights: [0.2, 0.2]
+      learning_rate: 3e-4
+    medium-expert:
+      w2_weights: [0.2, 0.2]
+      learning_rate: 3e-4
+  
+  walker2d:
+    medium:
+      w2_weights: [0.2, 0.2]
+      learning_rate: 3e-4
+    medium-replay:
+      w2_weights: [0.2, 0.2]
+      learning_rate: 3e-4
+    medium-expert:
+      w2_weights: [0.2, 0.2]
+      learning_rate: 3e-4
+  
+  antmaze:
+    umaze-v2:
+      w2_weights: [0.2, 0.2]
+      learning_rate: 1e-4
+    umaze-diverse-v2:
+      w2_weights: [0.2, 0.2]
+      learning_rate: 1e-4
+    medium-play-v2:
+      w2_weights: [0.2, 0.2]
+      learning_rate: 1e-4
+    medium-diverse-v2:
+      w2_weights: [0.2, 0.2]
+      learning_rate: 1e-4
+    large-play-v2:
+      w2_weights: [0.2, 0.2]
+      learning_rate: 1e-4
+    large-diverse-v2:
+      w2_weights: [0.2, 0.2]
+      learning_rate: 1e-4
