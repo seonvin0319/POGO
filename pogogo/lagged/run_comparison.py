@@ -1,11 +1,10 @@
-# File: pogogo/unlagged/run_comparison_unlagged.py
+# File: pogogo/lagged/run_comparison.py
 
 #!/usr/bin/env python3
 """
-POGO Unlagged-policy bootstrapping variant 통합 학습 실험 런처 (순차 실행 버전)
+POGO 통합 학습 실험 런처 (순차 실행 버전)
 - config.yaml에 정의된 환경/하이퍼를 순차 수행 (병렬처리 없음)
 - 통합 학습: actor_one과 actor_two를 동시에 학습
-- Unlagged-policy bootstrapping: TD target에 online policy 사용
 - 체크포인트에서 이어서 학습 가능 (load 모드)
 - GPU 사용
 """
@@ -90,15 +89,15 @@ def training_done(log_file: Path) -> bool:
 def run_phase(
     pyexec: Path, root_dir: Path, args: List[str], log_path: Path, env: Optional[Dict] = None
 ) -> Tuple[int, Optional[str]]:
-    """main_unlagged.py 한 번 실행. rc, 예외메시지 반환.
+    """main.py 한 번 실행. rc, 예외메시지 반환.
     conda 환경 off_rl_gpu를 활성화한 상태로 실행합니다.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     rc, err = 0, None
     try:
         with log_path.open('w', encoding='utf-8') as logf:
-            # conda activate off_rl_gpu && python main_unlagged.py 형태로 실행
-            cmd = f"conda run -n off_rl_gpu {str(pyexec)} -u main_unlagged.py {' '.join(args)}"
+            # conda activate off_rl_gpu && python main.py 형태로 실행
+            cmd = f"conda run -n off_rl_gpu {str(pyexec)} -u main.py {' '.join(args)}"
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(root_dir),
@@ -132,26 +131,26 @@ def strip_suffix(load_prefix: str) -> str:
 def run_unified_training(env_id: str, seed: int, w2_weights: List[float], 
                          lr: float, max_steps: int, eval_freq: int, split_ratio: float,
                          root_dir: Path, pyexec: Path) -> dict:
-    """통합 학습 실험: 0 → max_steps (모든 actor 동시 학습, Unlagged-policy bootstrapping variant)"""
+    """통합 학습 실험: 0 → max_steps (모든 actor 동시 학습)"""
     start = time.time()
     split_step = int(round(max_steps * split_ratio))
     
     # 로그/체크포인트 디렉토리
     logs_root = Path('logs')
     w2_str = "_".join([f"{w:.1f}" for w in w2_weights])
-    base = logs_root / safe(env_id) / f"w2_{w2_str}_unlagged" / f"seed_{seed}"
+    base = logs_root / safe(env_id) / f"w2_{w2_str}" / f"seed_{seed}"
     ckpt_dir = base / "checkpoints"
     log_dir = base / "training"
     log_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     
     # 완료된 로그 확인
-    existing_logs = list(log_dir.glob("POGO_Unlagged_unified_*.log"))
+    existing_logs = list(log_dir.glob("POGO_unified_*.log"))
     for log_file in existing_logs:
         if training_done(log_file):
             print(f"⏭️  통합 학습 스킵: {env_id} seed={seed} — 이미 완료됨 ({log_file.name})")
             return {
-                'env': env_id, 'seed': seed, 'experiment_type': 'unified_unlagged',
+                'env': env_id, 'seed': seed, 'experiment_type': 'unified',
                 'status': 'skipped_already_done', 'duration_min': 0.0,
                 'log': str(log_file.resolve()), 'checkpoint_dir': str(ckpt_dir.resolve())
             }
@@ -164,9 +163,9 @@ def run_unified_training(env_id: str, seed: int, w2_weights: List[float],
     if load_prefix:
         print(f"🔁 체크포인트에서 이어서 학습: {load_prefix}")
     else:
-        print(f"🔄 통합 학습 시작 (Unlagged-policy): {env_id} seed={seed} — 0→{max_steps}")
+        print(f"🔄 통합 학습 시작: {env_id} seed={seed} — 0→{max_steps}")
     
-    log_file = log_dir / f"POGO_Unlagged_unified_{safe(env_id)}_{seed}_{now_str().replace(':','-')}.log"
+    log_file = log_dir / f"POGO_unified_{safe(env_id)}_{seed}_{now_str().replace(':','-')}.log"
     
     env_vars = os.environ.copy()
     env_vars['CUDA_VISIBLE_DEVICES'] = '0'  # GPU 사용
@@ -196,13 +195,13 @@ def run_unified_training(env_id: str, seed: int, w2_weights: List[float],
     if rc != 0 or err:
         print(f"❌ 통합 학습 실패: rc={rc}, err={err}\n{tail(log_file, 30)}")
         return {
-            'env': env_id, 'seed': seed, 'experiment_type': 'unified_unlagged',
+            'env': env_id, 'seed': seed, 'experiment_type': 'unified',
             'status': 'failed', 'rc': rc, 'err': err, 'log': str(log_file.resolve())
         }
     
     dur_min = (time.time() - start) / 60.0
     return {
-        'env': env_id, 'seed': seed, 'experiment_type': 'unified_unlagged',
+        'env': env_id, 'seed': seed, 'experiment_type': 'unified',
         'status': 'success', 'duration_min': round(dur_min, 3),
         'log': str(log_file.resolve()), 'checkpoint_dir': str(ckpt_dir.resolve())
     }
@@ -211,16 +210,16 @@ def run_unified_training(env_id: str, seed: int, w2_weights: List[float],
 def main():
     ap = ArgumentParser()
     ap.add_argument('--config', default='config.yaml')
-    ap.add_argument('--root_dir', default='/home/svcho/POGO/pogogo/unlagged')
+    ap.add_argument('--root_dir', default='/home/svcho/POGO/pogogo/lagged')
     ap.add_argument('--pyexec', default='python')
     args = ap.parse_args()
 
     root_dir = Path(args.root_dir)
     pyexec = Path(args.pyexec)
-    # config.yaml 경로: unlagged 폴더 내 또는 상위 폴더에서 찾기
+    # config.yaml 경로: lagged 폴더 내 또는 상위 폴더에서 찾기
     config_path = Path(args.config)
     if not config_path.is_absolute():
-        # 상대 경로인 경우, unlagged 폴더 내에서 먼저 찾고, 없으면 상위 폴더에서 찾기
+        # 상대 경로인 경우, lagged 폴더 내에서 먼저 찾고, 없으면 상위 폴더에서 찾기
         if not (root_dir / config_path).exists():
             config_path = root_dir.parent / config_path
         else:
@@ -233,9 +232,9 @@ def main():
     seeds      = common['seeds']
     split_ratio= common.get('split_ratio', 0.5)
 
-    # 환경 순서 정의: halfcheetah → hopper → walker2d → antmaze
+    # 환경 순서 정의: hopper → halfcheetah → walker2d → antmaze
     env_order = {
-        'hopper': ['medium', 'medium-replay', 'medium-expert'], 
+        # 'hopper': ['medium', 'medium-replay', 'medium-expert'], 
         'halfcheetah': ['medium', 'medium-replay', 'medium-expert'],
         'walker2d': ['medium', 'medium-replay', 'medium-expert'],
         'antmaze': ['umaze-v2', 'umaze-diverse-v2', 'medium-play-v2', 'medium-diverse-v2', 'large-play-v2', 'large-diverse-v2'],
@@ -258,9 +257,9 @@ def main():
                 'lr': env_cfg['learning_rate'],
             })
 
-    print(f"🔬 총 {len(all_runs)*len(seeds)}개 실험 예정 (통합 학습, Unlagged-policy bootstrapping variant)")
+    print(f"🔬 총 {len(all_runs)*len(seeds)}개 실험 예정 (통합 학습)")
     print(f"📋 순차 실행 모드")
-    print(f"🔄 통합 학습: GPU 사용 (Unlagged-policy: online policy for TD target)")
+    print(f"🔄 통합 학습: GPU 사용")
     
     results = []
     t0 = time.time()
@@ -272,7 +271,7 @@ def main():
             print(f"— {e['env_id']} | w2_weights=[{w2_str}] lr={e['lr']}")
             
             # 통합 학습 실행
-            print(f"  🔄 통합 학습 실행 중... (Unlagged-policy)")
+            print(f"  🔄 통합 학습 실행 중...")
             r = run_unified_training(
                 env_id=e['env_id'], seed=seed,
                 w2_weights=e['w2_weights'],
@@ -288,14 +287,14 @@ def main():
 
     # 결과 저장
     ts = now_str().replace(':','-')
-    out_dir = Path(f"results_unlagged_{ts}")
+    out_dir = Path(f"results_{ts}")
     out_dir.mkdir(exist_ok=True)
     
     # JSON 저장
-    write_json(out_dir / "unified_unlagged_summary.json", results)
+    write_json(out_dir / "unified_summary.json", results)
 
     # CSV 저장
-    csv_file = out_dir / "unified_unlagged_results.csv"
+    csv_file = out_dir / "unified_results.csv"
     with csv_file.open('w', encoding='utf-8') as f:
         f.write("env,seed,experiment_type,status,rc,err,duration_min,log,checkpoint_dir\n")
         for r in results:
@@ -305,8 +304,7 @@ def main():
 
     mins = (time.time() - t0) / 60.0
     print("\n🏁 완료 | 총 소요 {:.1f}분 | 결과: {}".format(mins, out_dir))
-    print(f"📊 통합 학습 결과 (Unlagged-policy): {csv_file}")
+    print(f"📊 통합 학습 결과: {csv_file}")
 
 if __name__ == "__main__":
     main()
-
