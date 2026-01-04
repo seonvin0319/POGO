@@ -131,7 +131,7 @@ def strip_suffix(load_prefix: str) -> str:
 # ----------------------------
 def run_unified_training(env_id: str, seed: int, w2_weights: List[float], 
                          lr: float, max_steps: int, eval_freq: int, split_ratio: float,
-                         root_dir: Path, pyexec: Path, freeze_critic: bool = False) -> dict:
+                         root_dir: Path, pyexec: Path) -> dict:
     """통합 학습 실험: 0 → max_steps (모든 actor 동시 학습, Unlagged-policy bootstrapping variant)"""
     start = time.time()
     split_step = int(round(max_steps * split_ratio))
@@ -182,9 +182,6 @@ def run_unified_training(env_id: str, seed: int, w2_weights: List[float],
         '--save_model',
         '--wandb',  # Enable wandb logging by default
     ]
-    
-    if freeze_critic:
-        args_list.append('--freeze_critic')
     
     if start_mode == 'load' and load_prefix:
         args_list.extend(['--start_mode', 'load', '--load_prefix', load_prefix])
@@ -259,7 +256,6 @@ def main():
                 'env_id': env_id,
                 'w2_weights': env_cfg['w2_weights'],
                 'lr': env_cfg['learning_rate'],
-                'freeze_critic': env_cfg.get('freeze_critic', False),
             })
 
     print(f"🔬 총 {len(all_runs)*len(seeds)}개 실험 예정 (통합 학습, Unlagged-policy bootstrapping variant)")
@@ -273,7 +269,7 @@ def main():
         print(f"\n🎲 SEED {seed} 시작")
         for e in all_runs:
             w2_str = ", ".join([f"{w:.1f}" for w in e['w2_weights']])
-            print(f"— {e['env_id']} | w2_weights=[{w2_str}] lr={e['lr']} freeze_critic={e['freeze_critic']}")
+            print(f"— {e['env_id']} | w2_weights=[{w2_str}] lr={e['lr']}")
             
             # 통합 학습 실행
             print(f"  🔄 통합 학습 실행 중... (Unlagged-policy)")
@@ -283,8 +279,7 @@ def main():
                 lr=e['lr'],
                 max_steps=max_steps, eval_freq=eval_freq,
                 split_ratio=split_ratio,
-                root_dir=root_dir, pyexec=pyexec,
-                freeze_critic=e['freeze_critic']
+                root_dir=root_dir, pyexec=pyexec
             )
             results.append(r)
             print(f"  ✅ 통합 학습 완료: {r['status']}")
