@@ -1,4 +1,4 @@
-# File: pogogo/lagged/agent.py
+# File: pogogo/unlagged/agent_unlagged.py
 
 import copy
 from typing import Optional
@@ -118,8 +118,11 @@ class Critic(nn.Module):
 class POGO:
     """
     Unified POGO: multiple actors trained in a JKO chain.
+    
+    Unlagged-policy bootstrapping variant: uses online policy (actors[0]) instead of target policy for TD target.
 
     - Critic: uses the first actor (index 0) as 'behavior policy' for target actions.
+              Unlagged-policy bootstrapping: uses online actor instead of target actor.
 
     - Actor training:
       * actor[0] (π_0): POGO style, L2 to dataset actions
@@ -142,8 +145,7 @@ class POGO:
         policy_freq=1,
         w2_weights=[1.0, 1.0],
         lr=3e-4,
-        freeze_critic=False,
-        noise_shaping=False,
+        noise_shaping=True,
     ):
         self.num_actors = len(w2_weights)
         assert self.num_actors >= 1, "At least one actor is required."
@@ -177,7 +179,6 @@ class POGO:
         self.policy_noise = policy_noise
         self.noise_clip = noise_clip
         self.policy_freq = policy_freq
-        self.freeze_critic = freeze_critic
         self.noise_shaping = noise_shaping
         self.total_it = 0
         # Cache SamplesLoss object to avoid repeated instantiation
@@ -218,7 +219,7 @@ class POGO:
     def train(self, replay_buffer, batch_size=256):
         """
         Unified training:
-        - Critic: uses the first actor as behavior policy for TD target.
+        - Critic: uses the first actor (unlagged-policy bootstrapping: online actor) as behavior policy for TD target.
         - All actors: updated sequentially with respective JKO losses.
         """
 
@@ -230,44 +231,44 @@ class POGO:
         # ------------------------
         # Critic training
         # ------------------------
-        if not self.freeze_critic:
-            with torch.no_grad():
-                # Use target actor for TD3 stability
-                self.actor_targets[0].eval()
-                z_target = torch.randn_like(action, device=device)
-                next_action = self.actor_targets[0](next_state, z_target)
+        with torch.no_grad():
+            # Unlagged-policy bootstrapping: use online actor instead of target actor
+            actor0 = self.actors[0]
+            was_training = actor0.training
+            actor0.eval()
+            z_target = torch.randn_like(action, device=device)
+            next_action = actor0(next_state, z_target)
 
-                # Base TD target
-                target_Q1, target_Q2 = self.critic_target(next_state, next_action)
-                target_Q = reward + not_done * self.discount * torch.min(target_Q1, target_Q2)
+            # Base TD target
+            target_Q1, target_Q2 = self.critic_target(next_state, next_action)
+            target_Q = reward + not_done * self.discount * torch.min(target_Q1, target_Q2)
 
-                # Optional TD3-style noise shaping on target actions
-                if self.noise_shaping:
-                    action_noise = self.policy_noise * torch.randn_like(action)
-                    action_noise = action_noise.clamp(-self.noise_clip, self.noise_clip)
-                    action_noise = action_noise * self.max_action
-                    noisy_next_action = (next_action + action_noise).clamp(
-                        -self.max_action, self.max_action
-                    )
-                    noise_target_Q1, noise_target_Q2 = self.critic_target(
-                        next_state, noisy_next_action
-                    )
-                    noise_target_Q = reward + not_done * self.discount * torch.min(
-                        noise_target_Q1, noise_target_Q2
-                    )
-                    target_Q = torch.min(target_Q, noise_target_Q)
+            # Optional TD3-style noise shaping on target actions
+            if self.noise_shaping:
+                action_noise = self.policy_noise * torch.randn_like(action)
+                action_noise = action_noise.clamp(-self.noise_clip, self.noise_clip)
+                action_noise = action_noise * self.max_action
+                noisy_next_action = (next_action + action_noise).clamp(
+                    -self.max_action, self.max_action
+                )
+                noise_target_Q1, noise_target_Q2 = self.critic_target(
+                    next_state, noisy_next_action
+                )
+                noise_target_Q = reward + not_done * self.discount * torch.min(
+                    noise_target_Q1, noise_target_Q2
+                )
+                target_Q = torch.min(target_Q, noise_target_Q)
 
-                self.actor_targets[0].train()
+            # Restore actor0 training mode if it was training
+            if was_training:
+                actor0.train()
 
-            current_Q1, current_Q2 = self.critic(state, action)
-            critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q)
+        current_Q1, current_Q2 = self.critic(state, action)
+        critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q)
 
-            self.critic_optimizer.zero_grad()
-            critic_loss.backward()
-            self.critic_optimizer.step()
-        else:
-            critic_loss = torch.tensor(0.0, device=device)
-
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_optimizer.step()
         metrics = {"critic_loss": float(critic_loss.item())}
 
         # ------------------------
@@ -278,12 +279,12 @@ class POGO:
             for actor in self.actors:
                 actor.train()
 
-            # Independent z sampling for actor training
-            z_actor = torch.randn_like(action, device=device)
-
             for i in range(self.num_actors):
                 actor_i = self.actors[i]
                 w2_weight_i = self.w2_weights[i]
+
+                # Independent z sampling for actor training
+                z_actor = torch.randn_like(action, device=device)
 
                 # Transport map: π_i = T_s(state, z_actor)
                 pi_i = actor_i(state, z_actor)
@@ -346,23 +347,12 @@ class POGO:
                 p.requires_grad_(True)
 
             # Soft-update targets
-            if not self.freeze_critic:
-                for p, tp in zip(self.critic.parameters(), self.critic_target.parameters()):
-                    tp.data.copy_(self.tau * p.data + (1 - self.tau) * tp.data)
+            for p, tp in zip(self.critic.parameters(), self.critic_target.parameters()):
+                tp.data.copy_(self.tau * p.data + (1 - self.tau) * tp.data)
 
             for actor, actor_target in zip(self.actors, self.actor_targets):
                 for p, tp in zip(actor.parameters(), actor_target.parameters()):
                     tp.data.copy_(self.tau * p.data + (1 - self.tau) * tp.data)
-        else:
-            # No actor update this step
-            for i in range(self.num_actors):
-                metrics.update(
-                    {
-                        f"actor_{i}_loss": 0.0,
-                        f"Q_{i}_mean": 0.0,
-                        f"w2_{i}_distance": 0.0,
-                    }
-                )
 
         return metrics
 
@@ -401,3 +391,4 @@ class POGO:
                 torch.load(filename + f"_actor_{i}_optimizer", map_location=map_location)
             )
             self.actor_targets[i] = copy.deepcopy(self.actors[i])
+
