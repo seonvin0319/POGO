@@ -19,55 +19,55 @@ sinkhorn:
   backend: "tensorized"   # "tensorized", "online", "auto"
 
 environments:
-  hopper:
-    medium:
-      w2_weights: [0.2, 0.2]
-      learning_rate: 3e-4
-    medium-replay:
-      w2_weights: [0.2, 0.2]
-      learning_rate: 3e-4
-    medium-expert:
-      w2_weights: [0.2, 0.2]
-      learning_rate: 3e-4
-  
   halfcheetah:
     medium:
-      w2_weights: [0.2, 0.2]
+      w2_weights: [0.05, 0.3]
       learning_rate: 3e-4
     medium-replay:
-      w2_weights: [0.2, 0.2]
+      w2_weights: [0.05, 0.3]
       learning_rate: 3e-4
     medium-expert:
-      w2_weights: [0.2, 0.2]
+      w2_weights: [0.3, 0.3]
+      learning_rate: 3e-4
+
+  hopper:
+    medium:
+      w2_weights: [0.2, 0.3]
+      learning_rate: 3e-4
+    medium-replay:
+      w2_weights: [0.1, 0.3]
+      learning_rate: 3e-4
+    medium-expert:
+      w2_weights: [0.7, 0.1]
       learning_rate: 3e-4
   
   walker2d:
     medium:
-      w2_weights: [0.2, 0.2]
+      w2_weights: [0.2, 0.3]
       learning_rate: 3e-4
     medium-replay:
-      w2_weights: [0.2, 0.2]
+      w2_weights: [0.1, 0.1]
       learning_rate: 3e-4
     medium-expert:
-      w2_weights: [0.2, 0.2]
+      w2_weights: [0.3, 0.3]
       learning_rate: 3e-4
   
   antmaze:
     umaze-v2:
-      w2_weights: [0.2, 0.2]
+      w2_weights: [0.3, 0.3]
       learning_rate: 1e-4
     umaze-diverse-v2:
-      w2_weights: [0.2, 0.2]
+      w2_weights: [0.2, 0.3]
       learning_rate: 1e-4
     medium-play-v2:
-      w2_weights: [0.2, 0.2]
+      w2_weights: [0.1, 0.1]
       learning_rate: 1e-4
     medium-diverse-v2:
-      w2_weights: [0.2, 0.2]
+      w2_weights: [0.1, 0.1]
       learning_rate: 1e-4
     large-play-v2:
-      w2_weights: [0.2, 0.2]
+      w2_weights: [0.05, 0.3]
       learning_rate: 1e-4
     large-diverse-v2:
-      w2_weights: [0.2, 0.2]
+      w2_weights: [0.1, 0.5]
       learning_rate: 1e-4

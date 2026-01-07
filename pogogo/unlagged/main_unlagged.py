@@ -254,16 +254,22 @@ def train_unified(agent, env_name, seed, replay_buffer, mean, std,
         if use_wandb and wandb is not None:
             log_dict = {
                 "train/timestep": global_step + 1,
-                "train/critic_loss": metrics.get("critic_loss", 0.0),
             }
-            # Log per-actor metrics
+            # Only log metrics that exist (don't log 0.0 for missing metrics)
+            # Critic is trained every step (unless freeze_critic)
+            if "critic_loss" in metrics:
+                log_dict["train/critic_loss"] = metrics["critic_loss"]
+            
+            # Actor is updated every policy_freq steps, so these metrics are sparse
+            # Only log when actor was actually updated
             num_actors = getattr(agent, "num_actors", 1)
             for i in range(num_actors):
-                log_dict.update({
-                    f"train/actor_{i}_loss": metrics.get(f"actor_{i}_loss", 0.0),
-                    f"train/Q_{i}_mean": metrics.get(f"Q_{i}_mean", 0.0),
-                    f"train/w2_{i}_distance": metrics.get(f"w2_{i}_distance", 0.0),
-                })
+                if f"actor_{i}_loss" in metrics:
+                    log_dict.update({
+                        f"train/actor_{i}_loss": metrics[f"actor_{i}_loss"],
+                        f"train/Q_{i}_mean": metrics[f"Q_{i}_mean"],
+                        f"train/w2_{i}_distance": metrics[f"w2_{i}_distance"],
+                    })
             wandb.log(log_dict, step=global_step + 1)
 
         if (global_step + 1) % eval_freq == 0:
@@ -363,7 +369,6 @@ def parse_args():
     p.add_argument("--w2_weights", type=float, nargs="+", default=[0.5, 0.5], 
                    help="W2 weights for each actor (예: --w2_weights 0.2 0.2)")
     p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--freeze_critic", action="store_true", help="Freeze critic during training")
 
     # Final eval
     p.add_argument("--final_eval_runs", type=int, default=5)
@@ -411,7 +416,6 @@ def main():
                 "policy_freq": args.policy_freq,
                 "w2_weights": args.w2_weights,
                 "lr": args.lr,
-                "freeze_critic": args.freeze_critic,
                 "normalize": args.normalize,
                 "agent_variant": "unlagged",
             },
@@ -452,7 +456,6 @@ def main():
         policy_freq=args.policy_freq,
         w2_weights=args.w2_weights,
         lr=args.lr,
-        freeze_critic=args.freeze_critic,
     )
 
     # 로드 옵션
