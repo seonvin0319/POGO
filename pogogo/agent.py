@@ -1,4 +1,4 @@
-# File: pogogo/unlagged/agent_unlagged.py
+# File: pogogo/agent.py
 
 import copy
 from typing import Optional
@@ -9,7 +9,10 @@ import torch.nn.functional as F
 from geomloss import SamplesLoss
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# device = torch.device("cpu")
+if torch.cuda.is_available():
+    print(f"✅ CUDA 사용: {torch.cuda.get_device_name(0)}")
+else:
+    print("⚠️  CUDA를 사용할 수 없어 CPU를 사용합니다.")
 
 
 def per_state_sinkhorn(
@@ -22,6 +25,7 @@ def per_state_sinkhorn(
     use_ref_grad: bool = False,
     backend: str = "tensorized",
     sinkhorn_loss=None,  # Optional pre-instantiated SamplesLoss
+    seed: Optional[int] = None,  # 재현성을 위한 시드
 ):
     """
     Per-state Sinkhorn (W_p) between actor(·|s) and ref_policy(·|s).
@@ -36,9 +40,15 @@ def per_state_sinkhorn(
     a_dim = actor.head.out_features
     dev = states.device
 
-    # z for both policies: [B, K, a_dim]
-    z_a = torch.randn(B, K, a_dim, device=dev)
-    z_b = torch.randn(B, K, a_dim, device=dev)
+    # z for both policies: [B, K, a_dim] (재현성을 위해 시드 고정)
+    if seed is not None:
+        generator_a = torch.Generator(device=dev).manual_seed(seed)
+        generator_b = torch.Generator(device=dev).manual_seed(seed + 10000)
+        z_a = torch.randn(B, K, a_dim, device=dev, generator=generator_a)
+        z_b = torch.randn(B, K, a_dim, device=dev, generator=generator_b)
+    else:
+        z_a = torch.randn(B, K, a_dim, device=dev)
+        z_b = torch.randn(B, K, a_dim, device=dev)
 
     # Tile states: [B, s_dim] -> [B, K, s_dim] -> [B*K, s_dim]
     states_tiled = states.unsqueeze(1).expand(B, K, states.size(1))
@@ -119,10 +129,10 @@ class POGO:
     """
     Unified POGO: multiple actors trained in a JKO chain.
     
-    Unlagged-policy bootstrapping variant: uses online policy (actors[0]) instead of target policy for TD target.
+    Uses online policy (actors[0]) instead of target policy for TD target.
 
     - Critic: uses the first actor (index 0) as 'behavior policy' for target actions.
-              Unlagged-policy bootstrapping: uses online actor instead of target actor.
+              Uses online actor instead of target actor.
 
     - Actor training:
       * actor[0] (π_0): POGO style, L2 to dataset actions
@@ -146,11 +156,13 @@ class POGO:
         w2_weights=[1.0, 1.0],
         lr=3e-4,
         noise_shaping=True,
+        seed=None,  # 재현성을 위한 시드
     ):
         self.num_actors = len(w2_weights)
         assert self.num_actors >= 1, "At least one actor is required."
 
         self.w2_weights = w2_weights
+        self.seed = seed  # 재현성을 위한 시드 저장
 
         # Multiple actors
         self.actors = []
@@ -188,7 +200,7 @@ class POGO:
     # Action selection API (eval에서 actor_idx로 선택)
     # ------------------------------------------------------------------
 
-    def select_action(self, state, deterministic: bool = True, actor_idx: Optional[int] = None):
+    def select_action(self, state, deterministic: bool = True, actor_idx: Optional[int] = None, seed: Optional[int] = None):
         """
         Select action using transport map.
 
@@ -196,6 +208,7 @@ class POGO:
             state: 1D or 2D numpy array (state vector)
             deterministic: if True, z = 0; else z ~ N(0, I)
             actor_idx: which actor to use (None → last actor)
+            seed: 재현성을 위한 시드 (None이면 랜덤)
         """
         state = torch.as_tensor(state, dtype=torch.float32, device=device).reshape(1, -1)
 
@@ -207,7 +220,11 @@ class POGO:
         if deterministic:
             z = torch.zeros(state.shape[0], actor.head.out_features, device=device)
         else:
-            z = torch.randn(state.shape[0], actor.head.out_features, device=device)
+            if seed is not None:
+                generator = torch.Generator(device=device).manual_seed(seed)
+                z = torch.randn(state.shape[0], actor.head.out_features, device=device, generator=generator)
+            else:
+                z = torch.randn(state.shape[0], actor.head.out_features, device=device)
 
         action = actor(state, z)
         return action.detach().cpu().numpy().flatten()
@@ -219,24 +236,32 @@ class POGO:
     def train(self, replay_buffer, batch_size=256):
         """
         Unified training:
-        - Critic: uses the first actor (unlagged-policy bootstrapping: online actor) as behavior policy for TD target.
+        - Critic: uses the first actor (online actor) as behavior policy for TD target.
         - All actors: updated sequentially with respective JKO losses.
         """
 
         self.total_it += 1
 
-        # Sample batch
-        state, action, next_state, reward, not_done = replay_buffer.sample(batch_size)
+        # 재현성을 위한 시드 설정
+        # seed가 있으면 base_seed로 사용, 없으면 total_it 기반
+        base_seed = self.seed if self.seed is not None else 0
+        seed_base = base_seed * 1000000 + self.total_it * 1000  # 각 iteration마다 다른 시드
+        
+        # Sample batch (재현성을 위해 시드 고정)
+        buffer_seed = seed_base  # ReplayBuffer 샘플링용 시드
+        state, action, next_state, reward, not_done = replay_buffer.sample(batch_size, seed=buffer_seed)
 
         # ------------------------
         # Critic training
         # ------------------------
         with torch.no_grad():
-            # Unlagged-policy bootstrapping: use online actor instead of target actor
+            # Use online actor instead of target actor
             actor0 = self.actors[0]
             was_training = actor0.training
             actor0.eval()
-            z_target = torch.randn_like(action, device=device)
+            # 재현성을 위해 시드 고정
+            generator_target = torch.Generator(device=device).manual_seed(seed_base + 1)
+            z_target = torch.randn(action.shape, dtype=action.dtype, device=device, generator=generator_target)
             next_action = actor0(next_state, z_target)
 
             # Base TD target
@@ -245,7 +270,8 @@ class POGO:
 
             # Optional TD3-style noise shaping on target actions
             if self.noise_shaping:
-                action_noise = self.policy_noise * torch.randn_like(action)
+                generator_noise = torch.Generator(device=device).manual_seed(seed_base + 2)
+                action_noise = self.policy_noise * torch.randn(action.shape, dtype=action.dtype, device=device, generator=generator_noise)
                 action_noise = action_noise.clamp(-self.noise_clip, self.noise_clip)
                 action_noise = action_noise * self.max_action
                 noisy_next_action = (next_action + action_noise).clamp(
@@ -283,8 +309,9 @@ class POGO:
                 actor_i = self.actors[i]
                 w2_weight_i = self.w2_weights[i]
 
-                # Independent z sampling for actor training
-                z_actor = torch.randn_like(action, device=device)
+                # Independent z sampling for actor training (재현성을 위해 시드 고정)
+                generator_actor = torch.Generator(device=device).manual_seed(seed_base + 10 + i)
+                z_actor = torch.randn(action.shape, dtype=action.dtype, device=device, generator=generator_actor)
 
                 # Transport map: π_i = T_s(state, z_actor)
                 pi_i = actor_i(state, z_actor)
@@ -311,6 +338,8 @@ class POGO:
                     # Subsequent actors: Sinkhorn distance to previous actor
                     ref_actor = self.actors[i - 1]
                     ref_actor.eval()
+                    # 재현성을 위해 시드 고정 (total_it과 actor index 기반)
+                    sinkhorn_seed = seed_base + 100 + i
                     w2_i = per_state_sinkhorn(
                         actor_i,
                         ref_actor,
@@ -320,6 +349,7 @@ class POGO:
                         p=2,
                         use_ref_grad=False,
                         sinkhorn_loss=self._sinkhorn_loss,
+                        seed=sinkhorn_seed,
                     )
                     ref_actor.train()
 
