@@ -5,7 +5,7 @@ POGO는 오프라인 강화학습에서 Gradient flow를 통한 정책 최적화
 ## 주요 특징
 
 - **JKO Chain**: 여러 actor를 순차적으로 학습하는 gradient flow 기반 접근법
-- **Transport Map Actor**: `T_s: z ~ N(0,I) → action space` 형태의 정책 표현
+- **Transport Map Actor**: $T_s: z \sim \mathcal{N}(0,I) \to$ action space 형태의 정책 표현
 - **Sinkhorn W2 Distance**: 정책 간 거리를 Sinkhorn 알고리즘으로 계산
 - **재현성 보장**: 모든 랜덤 샘플링에 시드 고정 기능 포함
 - **D4RL 지원**: D4RL 벤치마크 데이터셋 지원
@@ -17,44 +17,38 @@ POGO는 오프라인 강화학습에서 Gradient flow를 통한 정책 최적화
 
 POGO는 JKO (Jordan-Kinderlehrer-Otto) chain을 사용하여 gradient flow의 이산 근사를 구현합니다. 여러 actor를 순차적으로 연결하여 연속적인 gradient flow를 근사합니다:
 
-- **Actor 0 (π₀)**: 데이터셋 액션에 대한 L2 loss로 학습
-- **Actor i (πᵢ, i ≥ 1)**: 이전 actor (πᵢ₋₁)에 대한 Sinkhorn W2 거리로 학습
+- **Actor 0 ($\pi_0$)**: 데이터셋 액션에 대한 L2 loss로 학습
+- **Actor i ($\pi_i$, $i \geq 1$)**: 이전 actor ($\pi_{i-1}$)에 대한 Sinkhorn W2 거리로 학습
 
 각 actor는 gradient flow의 한 단계를 나타내며, 전체 chain은 연속적인 정책 진화를 이산적으로 근사합니다.
 
-**Actor 0가 L2 loss를 사용하는 이유**: 데이터셋의 behavior policy π_β가 delta distribution(점 분포)이면, W2 거리가 L2 거리와 수학적으로 동일합니다. 따라서 Actor 0는 데이터셋 액션에 대해 L2 loss를 사용합니다. 반면 이후 actor들은 이전 actor라는 연속적인 분포를 reference로 하므로, 분포 간 거리를 정확히 측정하는 Sinkhorn W2 거리가 필요합니다.
+**Actor 0가 L2 loss를 사용하는 이유**: 데이터셋의 behavior policy $\pi_\beta$가 delta distribution(점 분포)이면, W2 거리가 L2 거리와 수학적으로 동일합니다. 따라서 Actor 0는 데이터셋 액션에 대해 L2 loss를 사용합니다. 반면 이후 actor들은 이전 actor라는 연속적인 분포를 reference로 하므로, 분포 간 거리를 정확히 측정하는 Sinkhorn W2 거리가 필요합니다.
 
 ### 학습 목표
 
 각 actor는 다음 JKO loss를 최소화합니다:
 
-```
-L_i = -λ * E[Q(s, πᵢ(s,z))] + w_i * W₂(πᵢ, πᵢ₋₁)
-```
+$$L_i = -\lambda \cdot \mathbb{E}[Q(s, \pi_i(s,z))] + w_i \cdot W_2(\pi_i, \pi_{i-1})$$
 
 여기서:
-- `Q(s, a)`: Critic 네트워크의 Q-value
-- `W₂(πᵢ, πᵢ₋₁)`: Sinkhorn W2 거리 (i=0일 때는 L2 거리)
-- `w_i`: W2 거리의 가중치
-- `λ`: Q-value의 정규화 계수
+- $Q(s, a)$: Critic 네트워크의 Q-value
+- $W_2(\pi_i, \pi_{i-1})$: Sinkhorn W2 거리 ($i=0$일 때는 L2 거리)
+- $w_i$: W2 거리의 가중치
+- $\lambda$: Q-value의 정규화 계수
 
 ### Transport Map
 
 Actor는 transport map을 neural network로 모델링합니다:
 
-```
-π(s, z) = T_s(s, z),  where z ~ N(0, I)
-```
+$$\pi(s, z) = T_s(s, z), \quad \text{where } z \sim \mathcal{N}(0, I)$$
 
-여기서 `T_s`는 state와 noise `z`를 입력으로 받아 action을 출력하는 neural network입니다. 이를 통해 같은 state에서도 다른 z 샘플링으로 다양한 액션을 생성할 수 있습니다.
+여기서 $T_s$는 state와 noise $z$를 입력으로 받아 action을 출력하는 neural network입니다. 이를 통해 같은 state에서도 다른 $z$ 샘플링으로 다양한 액션을 생성할 수 있습니다.
 
-### Critic 학습 (FQL 영향)
+### Critic 학습
 
-Critic은 첫 번째 actor (online actor)를 behavior policy로 사용하여 TD target을 계산합니다. 이는 Flow Q Learning (FQL)에서 영향을 받은 설계입니다:
+Critic은 첫 번째 actor (online actor)를 behavior policy로 사용하여 TD target을 계산합니다:
 
-```
-Q_target = r + γ * min(Q₁(s', π₀(s', z')), Q₂(s', π₀(s', z')))
-```
+$$Q_{\text{target}} = r + \gamma \cdot \min(Q_1(s', \pi_0(s', z')), Q_2(s', \pi_0(s', z')))$$
 
 Online policy를 사용함으로써 target policy의 지연 업데이트 문제를 완화하고, 더 빠른 학습을 가능하게 합니다.
 
@@ -195,3 +189,7 @@ POGO_sv/
 ## 참고 문헌
 
 자세한 알고리즘 설명은 `POGO.pdf`와 `POGO_supplement.pdf`를 참고하세요.
+
+## 라이선스
+
+[라이선스 정보를 여기에 추가하세요]
