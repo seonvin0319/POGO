@@ -1,8 +1,0 @@
-__pycache__/
-results/
-wandb/
-*.txt
-logs/
-.vscode/
-*.pdf
-*.png
