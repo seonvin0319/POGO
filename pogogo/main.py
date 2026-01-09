@@ -1,13 +1,13 @@
-# File: pogogo/unlagged/main_unlagged.py
+# File: pogogo/main.py
 
 #!/usr/bin/env python3
 """
-POGO Unlagged-policy bootstrapping variant: Single-step / Two-step 실행 메인
-- Unlagged-policy bootstrapping: TD target에 online policy 사용 (target policy 대신)
-- 사용법은 main.py와 동일합니다.
+POGO: Single-step / Two-step 실행 메인
+- TD target에 online policy 사용 (target policy 대신)
 """
 
 import os
+import sys
 import json
 import argparse
 from datetime import datetime
@@ -16,13 +16,8 @@ import torch
 import gym
 import d4rl
 
-try:
-    import wandb
-except ImportError:
-    wandb = None
-
 import utils
-from agent_unlagged import POGO
+from agent import POGO
 
 
 # ---------------------------
@@ -80,10 +75,18 @@ def eval_policy(policy, eval_env, mean, std, base_seed, eval_episodes=10, determ
     # Deterministic 평가
     det_total = 0.0
     for ep in range(eval_episodes):
+        # 재현성을 위해 각 episode마다 환경 시드 재설정
+        ep_seed = base_seed + ep
         try:
-            reset_result = eval_env.reset(seed=base_seed + ep)
-        except TypeError:
-            reset_result = eval_env.reset()
+            # action_space 시드 설정 (antmaze 등에서 중요)
+            eval_env.action_space.seed(ep_seed)
+            reset_result = eval_env.reset(seed=ep_seed)
+        except (TypeError, AttributeError):
+            # old gym 버전이나 action_space.seed가 없는 경우
+            try:
+                reset_result = eval_env.reset(seed=ep_seed)
+            except TypeError:
+                reset_result = eval_env.reset()
 
         state = reset_result[0] if isinstance(reset_result, tuple) else reset_result
         
@@ -101,13 +104,22 @@ def eval_policy(policy, eval_env, mean, std, base_seed, eval_episodes=10, determ
             ep_ret += reward
         det_total += ep_ret
     
-    # Stochastic 평가
+    # Stochastic 평가 (재현성을 위해 시드 고정)
     stoch_total = 0.0
+    step_count = 0
     for ep in range(eval_episodes):
+        # 재현성을 위해 각 episode마다 환경 시드 재설정
+        ep_seed = base_seed + ep
         try:
-            reset_result = eval_env.reset(seed=base_seed + ep)
-        except TypeError:
-            reset_result = eval_env.reset()
+            # action_space 시드 설정 (antmaze 등에서 중요)
+            eval_env.action_space.seed(ep_seed)
+            reset_result = eval_env.reset(seed=ep_seed)
+        except (TypeError, AttributeError):
+            # old gym 버전이나 action_space.seed가 없는 경우
+            try:
+                reset_result = eval_env.reset(seed=ep_seed)
+            except TypeError:
+                reset_result = eval_env.reset()
 
         state = reset_result[0] if isinstance(reset_result, tuple) else reset_result
 
@@ -115,7 +127,9 @@ def eval_policy(policy, eval_env, mean, std, base_seed, eval_episodes=10, determ
         ep_ret = 0.0
         while not done:
             nstate = (np.asarray(state).reshape(1, -1) - mean) / std
-            action = policy.select_action(nstate, deterministic=False, actor_idx=actor_idx)
+            # 재현성을 위해 episode와 step 기반 시드 사용
+            eval_seed = base_seed * 10000 + ep * 1000 + step_count
+            action = policy.select_action(nstate, deterministic=False, actor_idx=actor_idx, seed=eval_seed)
             step_out = eval_env.step(action)
             if len(step_out) == 5:
                 state, reward, terminated, truncated, _ = step_out
@@ -123,6 +137,7 @@ def eval_policy(policy, eval_env, mean, std, base_seed, eval_episodes=10, determ
             else:
                 state, reward, done, _ = step_out
             ep_ret += reward
+            step_count += 1
         stoch_total += ep_ret
     
     # 결과 계산
@@ -135,7 +150,7 @@ def eval_policy(policy, eval_env, mean, std, base_seed, eval_episodes=10, determ
     return det_avg, det_score, stoch_avg, stoch_score
 
 
-def final_evaluation(policy, env_name, seed, mean, std, runs=5, episodes=10, actor_idx=None, use_wandb=True):
+def final_evaluation(policy, env_name, seed, mean, std, runs=5, episodes=10, actor_idx=None):
     eval_env = make_env(env_name, seed + 10_000)  # 훈련 시드와 멀리 떨어뜨림
 
     det_scores, stoch_scores = [], []
@@ -159,18 +174,6 @@ def final_evaluation(policy, env_name, seed, mean, std, runs=5, episodes=10, act
     print("======== Final Evaluation (trained weights) ========")
     print(f"[FINAL] Deterministic: mean={det_scores.mean():.3f}, std={det_scores.std():.3f} over {runs}x{episodes}")
     print(f"[FINAL] Stochastic:   mean={stoch_scores.mean():.3f}, std={stoch_scores.std():.3f} over {runs}x{episodes}")
-    
-    # Log final evaluation to wandb
-    if use_wandb and wandb is not None:
-        actor_suffix = f"_actor_{actor_idx}" if actor_idx is not None else ""
-        wandb.log({
-            f"final{actor_suffix}/det_mean": float(det_scores.mean()),
-            f"final{actor_suffix}/det_std": float(det_scores.std()),
-            f"final{actor_suffix}/stoch_mean": float(stoch_scores.mean()),
-            f"final{actor_suffix}/stoch_std": float(stoch_scores.std()),
-            f"final{actor_suffix}/runs": runs,
-            f"final{actor_suffix}/episodes": episodes,
-        })
     
     return det_scores, stoch_scores
 
@@ -219,7 +222,7 @@ def load_checkpoint_into_AgentA(agentA, load_prefix: str):
 # ---------------------------
 def train_unified(agent, env_name, seed, replay_buffer, mean, std,
               max_steps, eval_freq, save_model, file_name, ckpt_dir,
-              midpoint_step, start_step=0, use_wandb=True):
+              midpoint_step, start_step=0):
     """
     POGO 통합 학습: actor_one과 actor_two를 동시에 학습
     두 actor 모두 평가하고 각각의 로그를 저장
@@ -244,33 +247,11 @@ def train_unified(agent, env_name, seed, replay_buffer, mean, std,
     num_actors = getattr(agent, "num_actors", 1)
     w2_weights = getattr(agent, "w2_weights", [1.0] * num_actors)
     w2_str = ", ".join([f"{w:.3f}" for w in w2_weights])
-    print(f"🚀 통합 학습 시작: {start_step} ~ {max_steps-1} steps (POGO Unlagged-policy, {num_actors}개 actor)")
+    print(f"🚀 통합 학습 시작: {start_step} ~ {max_steps-1} steps (POGO, {num_actors}개 actor)")
     print(f"   Actor weights: [{w2_str}]")
     
     for global_step in range(start_step, max_steps):
         metrics = agent.train(replay_buffer, batch_size=256)
-        
-        # Log training metrics to wandb
-        if use_wandb and wandb is not None:
-            log_dict = {
-                "train/timestep": global_step + 1,
-            }
-            # Only log metrics that exist (don't log 0.0 for missing metrics)
-            # Critic is trained every step (unless freeze_critic)
-            if "critic_loss" in metrics:
-                log_dict["train/critic_loss"] = metrics["critic_loss"]
-            
-            # Actor is updated every policy_freq steps, so these metrics are sparse
-            # Only log when actor was actually updated
-            num_actors = getattr(agent, "num_actors", 1)
-            for i in range(num_actors):
-                if f"actor_{i}_loss" in metrics:
-                    log_dict.update({
-                        f"train/actor_{i}_loss": metrics[f"actor_{i}_loss"],
-                        f"train/Q_{i}_mean": metrics[f"Q_{i}_mean"],
-                        f"train/w2_{i}_distance": metrics[f"w2_{i}_distance"],
-                    })
-            wandb.log(log_dict, step=global_step + 1)
 
         if (global_step + 1) % eval_freq == 0:
             print(f"[Training] Time steps: {global_step + 1}")
@@ -308,19 +289,6 @@ def train_unified(agent, env_name, seed, replay_buffer, mean, std,
                 print(f"  Actor {i} - Deterministic: {r['det_avg']:.3f}, D4RL score: {r['det_score']:.3f}")
                 print(f"  Actor {i} - Stochastic: {r['stoch_avg']:.3f}, D4RL score: {r['stoch_score']:.3f}")
             print("---------------------------------------")
-            
-            # Log eval results to wandb
-            if use_wandb and wandb is not None:
-                eval_log_dict = {"eval/timestep": global_step + 1}
-                for i in range(num_actors):
-                    r = actor_results[i]
-                    eval_log_dict.update({
-                        f"eval/actor_{i}_det_return": r['det_avg'],
-                        f"eval/actor_{i}_det_score": r['det_score'],
-                        f"eval/actor_{i}_stoch_return": r['stoch_avg'],
-                        f"eval/actor_{i}_stoch_score": r['stoch_score'],
-                    })
-                wandb.log(eval_log_dict, step=global_step + 1)
 
         if not midpoint_saved and midpoint_target is not None and (global_step + 1) >= midpoint_target:
             checkpoint_step = midpoint_target
@@ -382,69 +350,70 @@ def parse_args():
     p.add_argument("--load_prefix", type=str, default="",
                    help="체크포인트 prefix (확장자 없이). 예: ./logs/checkpoints/POGO_hopper-medium-v2_0_mid_500000")
 
-    # Wandb
-    p.add_argument("--wandb", action="store_true", help="Enable wandb logging")
-    p.add_argument("--wandb_project", type=str, default="POGOGO", help="Wandb project name")
-    p.add_argument("--wandb_entity", type=str, default=None, help="Wandb entity name")
-    p.add_argument("--wandb_name", type=str, default=None, help="Wandb run name (default: env_seed)")
-
     return p.parse_args()
 
 
 def main():
     args = parse_args()
 
-    # Wandb 초기화
-    if args.wandb and wandb is not None:
-        # 날짜+시간 형식: YYYYMMDD_HHMMSS
-        datetime_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        wandb_name = args.wandb_name or f"{args.env}_seed{args.seed}_unlagged_{datetime_str}"
-        wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            name=wandb_name,
-            config={
-                "env": args.env,
-                "seed": args.seed,
-                "max_timesteps": args.max_timesteps,
-                "eval_freq": args.eval_freq,
-                "batch_size": args.batch_size,
-                "discount": args.discount,
-                "tau": args.tau,
-                "policy_noise": args.policy_noise,
-                "noise_clip": args.noise_clip,
-                "policy_freq": args.policy_freq,
-                "w2_weights": args.w2_weights,
-                "lr": args.lr,
-                "normalize": args.normalize,
-                "agent_variant": "unlagged",
-            },
-        )
-        use_wandb = True
-    else:
-        use_wandb = False
-        if args.wandb and wandb is None:
-            print("Warning: wandb requested but not installed. Continuing without wandb logging.")
+    # 실험 환경 정보 출력
+    print("=" * 60)
+    print("POGO 실험 설정")
+    print("=" * 60)
+    print(f"Environment: {args.env}")
+    print(f"Seed: {args.seed}")
+    print(f"Max timesteps: {args.max_timesteps:,}")
+    print(f"Evaluation frequency: {args.eval_freq:,}")
+    print(f"W2 weights: {args.w2_weights}")
+    print(f"Learning rate: {args.lr}")
+    print(f"Batch size: {args.batch_size}")
+    print(f"Discount: {args.discount}")
+    print(f"Tau: {args.tau}")
+    print(f"Policy noise: {args.policy_noise}")
+    print(f"Noise clip: {args.noise_clip}")
+    print(f"Policy freq: {args.policy_freq}")
+    print(f"Normalize states: {args.normalize}")
+    print(f"Start mode: {args.start_mode}")
+    if args.load_prefix:
+        print(f"Load prefix: {args.load_prefix}")
+    print(f"Checkpoint dir: {args.checkpoint_dir}")
+    print("=" * 60)
+    print()
 
     # 파일 이름 기본값 (resume 시 덮어쓰기)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    default_file_name = f"POGO_Unlagged_{args.env}_{args.seed}_{timestamp}"
+    default_file_name = f"POGO_{args.env}_{args.seed}_{timestamp}"
     file_name = default_file_name
     os.makedirs("./results", exist_ok=True)
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     # 환경 및 데이터셋
+    print(f"Creating environment: {args.env}...")
+    sys.stdout.flush()
     env = make_env(args.env, args.seed)
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
     max_action = float(env.action_space.high[0])
+    
+    print(f"State dimension: {state_dim}")
+    print(f"Action dimension: {action_dim}")
+    print(f"Max action: {max_action}")
+    print()
 
     # 데이터 적재
+    print(f"Loading D4RL dataset for {args.env}...")
+    sys.stdout.flush()
     rb = utils.ReplayBuffer(state_dim, action_dim)
-    rb.convert_D4RL(d4rl.qlearning_dataset(env))
+    dataset = d4rl.qlearning_dataset(env)
+    print(f"D4RL dataset loaded. Converting to replay buffer...")
+    sys.stdout.flush()
+    rb.convert_D4RL(dataset)
     mean, std = normalize(rb, args.normalize)
+    print(f"Dataset size: {rb.size:,}")
+    print(f"State normalization: mean shape={mean.shape}, std shape={std.shape}")
+    print()
 
-    # POGO Unlagged-policy 통합 Agent 생성
+    # POGO 통합 Agent 생성
     agent = POGO(
         state_dim=state_dim,
         action_dim=action_dim,
@@ -456,6 +425,7 @@ def main():
         policy_freq=args.policy_freq,
         w2_weights=args.w2_weights,
         lr=args.lr,
+        seed=args.seed,  # 재현성을 위한 시드 전달
     )
 
     # 로드 옵션
@@ -480,7 +450,7 @@ def main():
             max_steps=args.max_timesteps, eval_freq=args.eval_freq,
             save_model=args.save_model, file_name=file_name,
             ckpt_dir=args.checkpoint_dir, midpoint_step=midpoint_step,
-            start_step=resume_step, use_wandb=use_wandb
+            start_step=resume_step
         )
     else:
         # scratch 모드: 처음부터 전체 학습
@@ -489,7 +459,7 @@ def main():
             max_steps=args.max_timesteps, eval_freq=args.eval_freq,
             save_model=args.save_model, file_name=file_name,
             ckpt_dir=args.checkpoint_dir, midpoint_step=midpoint_step,
-            start_step=0, use_wandb=use_wandb
+            start_step=0
         )
 
     # -------- Final evaluation for ALL actors --------
@@ -506,12 +476,7 @@ def main():
             runs=args.final_eval_runs,
             episodes=args.final_eval_episodes,
             actor_idx=i,
-            use_wandb=use_wandb,
         )
-    
-    # Finish wandb run
-    if use_wandb and wandb is not None:
-        wandb.finish()
 
 
 if __name__ == "__main__":
