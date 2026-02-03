@@ -1,8 +1,9 @@
 # File: pogogo/main.py
+# POGO 실행 메인 (agent.py)
 
 #!/usr/bin/env python3
 """
-POGO: Single-step / Two-step 실행 메인
+POGO: Single-step / Two-step 실행 메인 [agent.py]
 - TD target에 online policy 사용 (target policy 대신)
 """
 
@@ -15,6 +16,7 @@ import numpy as np
 import torch
 import gym
 import d4rl
+import wandb
 
 import utils
 from agent import POGO
@@ -24,12 +26,11 @@ from agent import POGO
 # 유틸
 # ---------------------------
 def set_global_seed(env, seed: int):
-    """Gym 버전 호환 시드 설정."""
+    """Gym 버전 호환 시드 설정. gym 0.23은 reset(seed=) 미지원 → env.seed(seed) 사용."""
     try:
         env.reset(seed=seed)
     except TypeError:
-        # old gym
-        env.seed(seed)
+        env.seed(seed)  # gym 0.23 등
     try:
         env.action_space.seed(seed)
     except Exception:
@@ -77,15 +78,16 @@ def eval_policy(policy, eval_env, mean, std, base_seed, eval_episodes=10, determ
     for ep in range(eval_episodes):
         # 재현성을 위해 각 episode마다 환경 시드 재설정
         ep_seed = base_seed + ep
+        np.random.seed(ep_seed)  # antmaze 등 reset 시 전역 np.random 쓰는 env용
         try:
-            # action_space 시드 설정 (antmaze 등에서 중요)
             eval_env.action_space.seed(ep_seed)
             reset_result = eval_env.reset(seed=ep_seed)
         except (TypeError, AttributeError):
-            # old gym 버전이나 action_space.seed가 없는 경우
             try:
                 reset_result = eval_env.reset(seed=ep_seed)
             except TypeError:
+                if hasattr(eval_env, 'seed'):
+                    eval_env.seed(ep_seed)  # gym 0.23 등 reset(seed=) 미지원 시
                 reset_result = eval_env.reset()
 
         state = reset_result[0] if isinstance(reset_result, tuple) else reset_result
@@ -108,17 +110,17 @@ def eval_policy(policy, eval_env, mean, std, base_seed, eval_episodes=10, determ
     stoch_total = 0.0
     step_count = 0
     for ep in range(eval_episodes):
-        # 재현성을 위해 각 episode마다 환경 시드 재설정
         ep_seed = base_seed + ep
+        np.random.seed(ep_seed)  # antmaze 등 reset 시 전역 np.random 쓰는 env용
         try:
-            # action_space 시드 설정 (antmaze 등에서 중요)
             eval_env.action_space.seed(ep_seed)
             reset_result = eval_env.reset(seed=ep_seed)
         except (TypeError, AttributeError):
-            # old gym 버전이나 action_space.seed가 없는 경우
             try:
                 reset_result = eval_env.reset(seed=ep_seed)
             except TypeError:
+                if hasattr(eval_env, 'seed'):
+                    eval_env.seed(ep_seed)
                 reset_result = eval_env.reset()
 
         state = reset_result[0] if isinstance(reset_result, tuple) else reset_result
@@ -150,7 +152,7 @@ def eval_policy(policy, eval_env, mean, std, base_seed, eval_episodes=10, determ
     return det_avg, det_score, stoch_avg, stoch_score
 
 
-def final_evaluation(policy, env_name, seed, mean, std, runs=5, episodes=10, actor_idx=None):
+def final_evaluation(policy, env_name, seed, mean, std, runs=5, episodes=10, actor_idx=None, use_wandb=False):
     eval_env = make_env(env_name, seed + 10_000)  # 훈련 시드와 멀리 떨어뜨림
 
     det_scores, stoch_scores = [], []
@@ -174,6 +176,16 @@ def final_evaluation(policy, env_name, seed, mean, std, runs=5, episodes=10, act
     print("======== Final Evaluation (trained weights) ========")
     print(f"[FINAL] Deterministic: mean={det_scores.mean():.3f}, std={det_scores.std():.3f} over {runs}x{episodes}")
     print(f"[FINAL] Stochastic:   mean={stoch_scores.mean():.3f}, std={stoch_scores.std():.3f} over {runs}x{episodes}")
+    
+    # wandb 로깅: 최종 평가 결과
+    if use_wandb:
+        actor_suffix = f"_actor_{actor_idx}" if actor_idx is not None else ""
+        wandb.log({
+            f"final{actor_suffix}/det_mean": float(det_scores.mean()),
+            f"final{actor_suffix}/det_std": float(det_scores.std()),
+            f"final{actor_suffix}/stoch_mean": float(stoch_scores.mean()),
+            f"final{actor_suffix}/stoch_std": float(stoch_scores.std()),
+        })
     
     return det_scores, stoch_scores
 
@@ -222,7 +234,7 @@ def load_checkpoint_into_AgentA(agentA, load_prefix: str):
 # ---------------------------
 def train_unified(agent, env_name, seed, replay_buffer, mean, std,
               max_steps, eval_freq, save_model, file_name, ckpt_dir,
-              midpoint_step, start_step=0):
+              midpoint_step, start_step=0, use_wandb=False):
     """
     POGO 통합 학습: actor_one과 actor_two를 동시에 학습
     두 actor 모두 평가하고 각각의 로그를 저장
@@ -252,6 +264,12 @@ def train_unified(agent, env_name, seed, replay_buffer, mean, std,
     
     for global_step in range(start_step, max_steps):
         metrics = agent.train(replay_buffer, batch_size=256)
+        
+        # wandb 로깅: 학습 메트릭
+        if use_wandb:
+            log_dict = {f"train/{k}": v for k, v in metrics.items()}
+            log_dict["train/global_step"] = global_step + 1
+            wandb.log(log_dict, step=global_step + 1)
 
         if (global_step + 1) % eval_freq == 0:
             print(f"[Training] Time steps: {global_step + 1}")
@@ -289,6 +307,18 @@ def train_unified(agent, env_name, seed, replay_buffer, mean, std,
                 print(f"  Actor {i} - Deterministic: {r['det_avg']:.3f}, D4RL score: {r['det_score']:.3f}")
                 print(f"  Actor {i} - Stochastic: {r['stoch_avg']:.3f}, D4RL score: {r['stoch_score']:.3f}")
             print("---------------------------------------")
+            
+            # wandb 로깅: 평가 메트릭
+            if use_wandb:
+                eval_log_dict = {}
+                for i in range(num_actors):
+                    r = actor_results[i]
+                    eval_log_dict[f"eval/actor_{i}/det_score"] = r['det_score']
+                    eval_log_dict[f"eval/actor_{i}/det_avg"] = r['det_avg']
+                    eval_log_dict[f"eval/actor_{i}/stoch_score"] = r['stoch_score']
+                    eval_log_dict[f"eval/actor_{i}/stoch_avg"] = r['stoch_avg']
+                eval_log_dict["eval/global_step"] = global_step + 1
+                wandb.log(eval_log_dict, step=global_step + 1)
 
         if not midpoint_saved and midpoint_target is not None and (global_step + 1) >= midpoint_target:
             checkpoint_step = midpoint_target
@@ -342,6 +372,13 @@ def parse_args():
     p.add_argument("--final_eval_runs", type=int, default=5)
     p.add_argument("--final_eval_episodes", type=int, default=10)
 
+    # Wandb
+    p.add_argument("--wandb", action="store_true", default=True, help="Enable wandb logging (default: True)")
+    p.add_argument("--no-wandb", dest="wandb", action="store_false", help="Disable wandb logging")
+    p.add_argument("--wandb_project", type=str, default="POGOGO", help="Wandb project name")
+    p.add_argument("--wandb_entity", type=str, default=None, help="Wandb entity name")
+    p.add_argument("--wandb_name", type=str, default=None, help="Wandb run name")
+
     # Unified training control
     p.add_argument("--checkpoint_dir", type=str, default="./logs/checkpoints")
 
@@ -355,6 +392,44 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # 시드 고정 (train curve 동일하게: antmaze 포함 모든 환경)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+    # Wandb 초기화
+    if args.wandb:
+        wandb_name = args.wandb_name or f"{args.env}_seed{args.seed}"
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=wandb_name,
+            config={
+                "env": args.env,
+                "seed": args.seed,
+                "max_timesteps": args.max_timesteps,
+                "eval_freq": args.eval_freq,
+                "w2_weights": args.w2_weights,
+                "lr": args.lr,
+                "batch_size": args.batch_size,
+                "discount": args.discount,
+                "tau": args.tau,
+                "policy_noise": args.policy_noise,
+                "noise_clip": args.noise_clip,
+                "policy_freq": args.policy_freq,
+                "normalize": args.normalize,
+                "start_mode": args.start_mode,
+                "final_eval_runs": args.final_eval_runs,
+                "final_eval_episodes": args.final_eval_episodes,
+                "use_q_grad_norm": False,  # Q gradient norm regularization enabled
+            },
+            reinit=True,
+        )
+        print(f"✅ Wandb 초기화 완료: project={args.wandb_project}, name={wandb_name}")
 
     # 실험 환경 정보 출력
     print("=" * 60)
@@ -374,6 +449,7 @@ def main():
     print(f"Policy freq: {args.policy_freq}")
     print(f"Normalize states: {args.normalize}")
     print(f"Start mode: {args.start_mode}")
+    print(f"Wandb logging: {args.wandb}")
     if args.load_prefix:
         print(f"Load prefix: {args.load_prefix}")
     print(f"Checkpoint dir: {args.checkpoint_dir}")
@@ -382,7 +458,7 @@ def main():
 
     # 파일 이름 기본값 (resume 시 덮어쓰기)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    default_file_name = f"POGO_{args.env}_{args.seed}_{timestamp}"
+    default_file_name = f"POGO-{args.env}_{args.seed}_{timestamp}"
     file_name = default_file_name
     os.makedirs("./results", exist_ok=True)
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -450,7 +526,7 @@ def main():
             max_steps=args.max_timesteps, eval_freq=args.eval_freq,
             save_model=args.save_model, file_name=file_name,
             ckpt_dir=args.checkpoint_dir, midpoint_step=midpoint_step,
-            start_step=resume_step
+            start_step=resume_step, use_wandb=args.wandb
         )
     else:
         # scratch 모드: 처음부터 전체 학습
@@ -459,7 +535,7 @@ def main():
             max_steps=args.max_timesteps, eval_freq=args.eval_freq,
             save_model=args.save_model, file_name=file_name,
             ckpt_dir=args.checkpoint_dir, midpoint_step=midpoint_step,
-            start_step=0
+            start_step=0, use_wandb=args.wandb
         )
 
     # -------- Final evaluation for ALL actors --------
@@ -476,7 +552,12 @@ def main():
             runs=args.final_eval_runs,
             episodes=args.final_eval_episodes,
             actor_idx=i,
+            use_wandb=args.wandb,
         )
+    
+    # Wandb 종료
+    if args.wandb:
+        wandb.finish()
 
 
 if __name__ == "__main__":
