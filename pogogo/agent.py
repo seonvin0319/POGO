@@ -124,15 +124,57 @@ class Critic(nn.Module):
         q1 = self.l3(q1)
         return q1
 
+    def gradient_norm(self, state, action, GFO=True):
+        if GFO:
+            eps = 1e-3  # 1e-5는 float32에서 너무 작아 불안정할 때 많음
+            action_dim = action.shape[1]
+
+            # actor로 gradient 새는 걸 막기 위해 action은 detach해서 사용
+            a0 = action.detach()
+
+            # baseline Q (detach 안 해도 됨: critic weight에 대해선 역전파되게 두는 게 자연스러움)
+            q1, q2 = self.forward(state, a0)
+            q_base = torch.min(q1, q2).squeeze(1)  # [B]
+
+            grad_approx_list = []
+            for i in range(action_dim):
+                a_eps = a0.clone()
+                a_eps[:, i] += eps
+
+                q1p, q2p = self.forward(state, a_eps)
+                q_pert = torch.min(q1p, q2p).squeeze(1)  # [B]
+
+                grad_i = (q_pert - q_base) / eps  # [B]
+                grad_approx_list.append(grad_i)
+
+            grad_approx = torch.stack(grad_approx_list, dim=1)  # [B, action_dim]
+            grad_norm = torch.norm(grad_approx, dim=1)          # [B]
+            return grad_norm
+
+        else:
+            # autograd로 할 때도 actor로 새지 않게 detach 권장
+            a = action.detach().requires_grad_(True)
+
+            q1, q2 = self.forward(state, a)
+            q = torch.min(q1, q2)
+
+            grad = torch.autograd.grad(
+                outputs=q.sum(),
+                inputs=a,
+                create_graph=True,
+                retain_graph=True,
+            )[0]
+            grad_norm = torch.norm(grad, dim=1)
+            return grad_norm
+
 
 class POGO:
     """
     Unified POGO: multiple actors trained in a JKO chain.
     
-    Uses online policy (actors[0]) instead of target policy for TD target.
+    Uses target actor for TD target computation.
 
-    - Critic: uses the first actor (index 0) as 'behavior policy' for target actions.
-              Uses online actor instead of target actor.
+    - Critic: uses the first target actor (index 0) for target actions.
 
     - Actor training:
       * actor[0] (π_0): POGO style, L2 to dataset actions
@@ -236,7 +278,7 @@ class POGO:
     def train(self, replay_buffer, batch_size=256):
         """
         Unified training:
-        - Critic: uses the first actor (online actor) as behavior policy for TD target.
+        - Critic: uses the first target actor for TD target computation.
         - All actors: updated sequentially with respective JKO losses.
         """
 
@@ -255,14 +297,12 @@ class POGO:
         # Critic training
         # ------------------------
         with torch.no_grad():
-            # Use online actor instead of target actor
-            actor0 = self.actors[0]
-            was_training = actor0.training
-            actor0.eval()
+            # Use target actor for TD target
+            actor0_target = self.actor_targets[0]
             # 재현성을 위해 시드 고정
             generator_target = torch.Generator(device=device).manual_seed(seed_base + 1)
             z_target = torch.randn(action.shape, dtype=action.dtype, device=device, generator=generator_target)
-            next_action = actor0(next_state, z_target)
+            next_action = actor0_target(next_state, z_target)
 
             # Base TD target
             target_Q1, target_Q2 = self.critic_target(next_state, next_action)
@@ -283,11 +323,8 @@ class POGO:
                 noise_target_Q = reward + not_done * self.discount * torch.min(
                     noise_target_Q1, noise_target_Q2
                 )
-                target_Q = torch.min(target_Q, noise_target_Q)
-
-            # Restore actor0 training mode if it was training
-            if was_training:
-                actor0.train()
+                # target_Q = torch.min(target_Q, noise_target_Q)
+                target_Q = noise_target_Q
 
         current_Q1, current_Q2 = self.critic(state, action)
         critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q)
@@ -354,11 +391,24 @@ class POGO:
                     ref_actor.train()
 
                 # JKO loss: L = - lambda * E[Q] + w_i * W2
-                denom = Q_i.abs().mean().detach().clamp_min(1e-6)
+                # denom = Q_i.abs().mean().detach().clamp_min(1e-6)
+                denom = 1.0
                 actor_loss_i = -(Q_i.mean() / denom) + w2_weight_i * w2_i
 
                 # Sequential backward: ensures critic freeze state is correct during backward
                 opt = self.actor_optimizers[i]
+                opt.zero_grad()
+                
+                # Calculate Q gradient norm (Q_i.mean()만 backward하여 순수한 Q gradient 계산)
+                Q_i_mean = Q_i.mean()
+                Q_i_mean.backward(retain_graph=True)
+                Q_grad_norm = 0.0
+                for param in actor_i.parameters():
+                    if param.grad is not None:
+                        Q_grad_norm += param.grad.data.norm(2).item() ** 2
+                Q_grad_norm = Q_grad_norm ** 0.5
+                
+                # Clear gradients and do full backward
                 opt.zero_grad()
                 actor_loss_i.backward()
                 opt.step()
@@ -368,6 +418,7 @@ class POGO:
                     {
                         f"actor_{i}_loss": float(actor_loss_i.item()),
                         f"Q_{i}_mean": float(Q_i.mean().item()),
+                        f"Q_{i}_grad_norm": float(Q_grad_norm),
                         f"w2_{i}_distance": float(w2_i.item()),
                     }
                 )
