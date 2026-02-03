@@ -3,7 +3,8 @@
 #!/usr/bin/env python3
 """
 POGO 통합 학습 실험 런처 (순차 실행 버전)
-- config.yaml에 정의된 환경/하이퍼를 순차 수행 (병렬처리 없음)
+- config.yaml + main.py (agent.py)
+- config에 정의된 환경/하이퍼를 순차 수행 (병렬처리 없음)
 - 통합 학습: actor_one과 actor_two를 동시에 학습
 - TD target에 online policy 사용
 - 체크포인트에서 이어서 학습 가능 (load 모드)
@@ -11,6 +12,11 @@ POGO 통합 학습 실험 런처 (순차 실행 버전)
 """
 
 import os
+
+MAIN_SCRIPT = "main.py"
+WANDB_PROJECT = "POGOGO"
+LOGS_ROOT = "logs"
+LOG_PREFIX = "POGO"
 import sys
 import time
 import json
@@ -113,9 +119,9 @@ def training_done(log_file: Path) -> bool:
 def run_phase(
     pyexec: Path, root_dir: Path, args: List[str], log_path: Path, env: Optional[Dict] = None
 ) -> Tuple[int, Optional[str]]:
-    """main.py 한 번 실행. rc, 예외메시지 반환.
+    """{} 한 번 실행. rc, 예외메시지 반환.
     예시 코드처럼 단순하게 파일에 직접 리다이렉트합니다.
-    """
+    """.format(MAIN_SCRIPT)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     rc, err = 0, None
     
@@ -125,7 +131,7 @@ def run_phase(
         
         with log_path.open('w', encoding='utf-8') as logf:
             proc = subprocess.Popen(
-                [str(pyexec), '-u', 'main.py'] + args,
+                [str(pyexec), '-u', MAIN_SCRIPT] + args,
                 cwd=str(root_dir),
                 env=env_vars,
                 stdout=logf,
@@ -161,7 +167,7 @@ def run_unified_training(env_id: str, seed: int, w2_weights: List[float],
     split_step = int(round(max_steps * split_ratio))
     
     # 로그/체크포인트 디렉토리
-    logs_root = Path('logs')
+    logs_root = Path(LOGS_ROOT)
     w2_str = "_".join([format_w2_weight(w) for w in w2_weights])
     base = logs_root / safe(env_id) / f"w2_{w2_str}" / f"seed_{seed}"
     ckpt_dir = base / "checkpoints"
@@ -170,7 +176,7 @@ def run_unified_training(env_id: str, seed: int, w2_weights: List[float],
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     
     # 완료된 로그 확인
-    existing_logs = list(log_dir.glob("POGO_unifiedd*.log"))
+    existing_logs = list(log_dir.glob(f"{LOG_PREFIX}_unified*.log"))
     for log_file in existing_logs:
         if training_done(log_file):
             print(f"⏭️  통합 학습 스킵: {env_id} seed={seed} — 이미 완료됨 ({log_file.name})")
@@ -183,7 +189,7 @@ def run_unified_training(env_id: str, seed: int, w2_weights: List[float],
     
     print(f"🔄 통합 학습 시작: {env_id} seed={seed} — 0→{max_steps}")
     
-    log_file = log_dir / f"POGO_unified_{safe(env_id)}_{seed}_{now_str().replace(':','-')}.log"
+    log_file = log_dir / f"{LOG_PREFIX}_unified_{safe(env_id)}_{seed}_{now_str().replace(':','-')}.log"
     
     env_vars = os.environ.copy()
     env_vars['CUDA_VISIBLE_DEVICES'] = '0'  # GPU 사용
@@ -197,6 +203,8 @@ def run_unified_training(env_id: str, seed: int, w2_weights: List[float],
         '--lr', str(lr),
         '--checkpoint_dir', str(ckpt_dir),
         '--save_model',
+        '--wandb',
+        '--wandb_project', WANDB_PROJECT,
     ]
     
     rc, err = run_phase(
@@ -223,107 +231,148 @@ def run_unified_training(env_id: str, seed: int, w2_weights: List[float],
 
 def main():
     ap = ArgumentParser()
-    ap.add_argument('--config', default='config.yaml')
+    ap.add_argument('--config', default='config.yaml', 
+                    help='Config file or pattern (e.g., config_w2_0.1_0.3_*.yaml for multiple configs)')
     ap.add_argument('--root_dir', default='.')
-    ap.add_argument('--pyexec', default='/home/offrl/miniconda3/envs/offrl/bin/python')
+    ap.add_argument('--pyexec', default='/home/svcho/anaconda3/envs/off_rl_gpu/bin/python')
     args = ap.parse_args()
 
     root_dir = Path(args.root_dir)
     pyexec = Path(args.pyexec)
-    # config.yaml 경로: 현재 디렉토리에서 먼저 찾고, 없으면 root_dir 기준으로 찾기
-    config_path = Path(args.config)
-    if not config_path.is_absolute():
-        # 상대 경로인 경우, 현재 디렉토리에서 먼저 찾기
-        if config_path.exists():
-            config_path = config_path.resolve()
-        elif (root_dir / config_path).exists():
-            config_path = root_dir / config_path
-        elif (root_dir.parent / config_path).exists():
-            config_path = root_dir.parent / config_path
-        else:
-            # 현재 디렉토리를 기본으로 사용
-            config_path = Path.cwd() / config_path
-    cfg = load_yaml(config_path)
-
-    common = cfg['common']
-    max_steps  = common['max_timesteps']
-    eval_freq  = common['eval_freq']
-    seeds      = common['seeds']
-    split_ratio= common.get('split_ratio', 0.5)
-
-    # 환경 순서 정의: halfcheetah → hopper → walker2d → antmaze
-    env_order = {
-        'halfcheetah': ['medium', 'medium-replay', 'medium-expert'],
-        'hopper': ['medium', 'medium-replay', 'medium-expert'], 
-        'walker2d': ['medium', 'medium-replay', 'medium-expert'], 
-        'antmaze': ['umaze-v2', 'umaze-diverse-v2', 'medium-play-v2', 'medium-diverse-v2', 'large-play-v2', 'large-diverse-v2'], 
-    }
-
-    all_runs = []
-    for env_key in env_order.keys():
-        if env_key not in cfg['environments']:
-            continue
-        datasets = cfg['environments'][env_key]
-        for dataset_key in env_order[env_key]:
-            if dataset_key not in datasets:
-                continue
-            env_cfg = datasets[dataset_key]
-            env_id = f"{env_key}-{dataset_key}"
-            
-            all_runs.append({
-                'env_id': env_id,
-                'w2_weights': env_cfg['w2_weights'],
-                'lr': env_cfg['learning_rate'],
-            })
-
-    print(f"🔬 총 {len(all_runs)*len(seeds)}개 실험 예정 (통합 학습)")
-    print(f"📋 순차 실행 모드")
-    print(f"🔄 통합 학습: GPU 사용 (online policy for TD target)")
     
-    results = []
-    t0 = time.time()
+    # 여러 config 파일 지원: 패턴 매칭 또는 단일 파일
+    config_pattern = Path(args.config)
+    if '*' in str(config_pattern) or '?' in str(config_pattern):
+        # 패턴 매칭: 여러 config 파일 찾기
+        if config_pattern.is_absolute():
+            config_files = sorted(list(config_pattern.parent.glob(config_pattern.name)))
+        else:
+            # 현재 디렉토리와 root_dir에서 찾기
+            config_files = sorted(list(Path.cwd().glob(config_pattern.name)))
+            if not config_files:
+                config_files = sorted(list((root_dir / config_pattern).parent.glob(config_pattern.name)))
+    else:
+        # 단일 config 파일
+        config_path = Path(args.config)
+        if not config_path.is_absolute():
+            if config_path.exists():
+                config_path = config_path.resolve()
+            elif (root_dir / config_path).exists():
+                config_path = root_dir / config_path
+            elif (root_dir.parent / config_path).exists():
+                config_path = root_dir.parent / config_path
+            else:
+                config_path = Path.cwd() / config_path
+        config_files = [config_path]
+    
+    if not config_files:
+        print(f"❌ Config 파일을 찾을 수 없습니다: {args.config}")
+        return
+    
+    print(f"📋 총 {len(config_files)}개의 config 파일을 순차 실행합니다:")
+    for cf in config_files:
+        print(f"   - {cf.name}")
+    print()
+    
+    all_results = []
+    total_t0 = time.time()
+    
+    # 각 config 파일에 대해 순차 실행
+    for config_idx, config_path in enumerate(config_files, 1):
+        print(f"\n{'='*60}")
+        print(f"📄 Config {config_idx}/{len(config_files)}: {config_path.name}")
+        print(f"{'='*60}\n")
+        
+        cfg = load_yaml(config_path)
 
-    for seed in seeds:
-        print(f"\n🎲 SEED {seed} 시작")
-        for e in all_runs:
-            w2_str = ", ".join([format_w2_weight(w) for w in e['w2_weights']])
-            print(f"— {e['env_id']} | w2_weights=[{w2_str}] lr={e['lr']}")
-            
-            # 통합 학습 실행
-            print(f"  🔄 통합 학습 실행 중...")
-            r = run_unified_training(
-                env_id=e['env_id'], seed=seed,
-                w2_weights=e['w2_weights'],
-                lr=e['lr'],
-                max_steps=max_steps, eval_freq=eval_freq,
-                split_ratio=split_ratio,
-                root_dir=root_dir, pyexec=pyexec
-            )
-            results.append(r)
-            print(f"  ✅ 통합 학습 완료: {r['status']}")
-            
-            print(f"✅ {e['env_id']} seed={seed} 완료")
+        common = cfg['common']
+        max_steps  = common['max_timesteps']
+        eval_freq  = common['eval_freq']
+        seeds      = common['seeds']
+        split_ratio= common.get('split_ratio', 0.5)
 
-    # 결과 저장
+        # 환경 순서 정의: halfcheetah → hopper → walker2d → antmaze
+        env_order = {
+            'halfcheetah': ['medium', 'medium-replay', 'medium-expert'],
+            'hopper': ['medium', 'medium-replay', 'medium-expert'], 
+            'walker2d': ['medium', 'medium-replay', 'medium-expert'], 
+            'antmaze': ['umaze-v2', 'umaze-diverse-v2', 'medium-play-v2', 'medium-diverse-v2', 'large-play-v2', 'large-diverse-v2'], 
+        }
+
+        all_runs = []
+        for env_key in env_order.keys():
+            if env_key not in cfg['environments']:
+                continue
+            datasets = cfg['environments'][env_key]
+            for dataset_key in env_order[env_key]:
+                if dataset_key not in datasets:
+                    continue
+                env_cfg = datasets[dataset_key]
+                env_id = f"{env_key}-{dataset_key}"
+                
+                all_runs.append({
+                    'env_id': env_id,
+                    'w2_weights': env_cfg['w2_weights'],
+                    'lr': env_cfg['learning_rate'],
+                })
+
+        print(f"🔬 이 config에서 {len(all_runs)*len(seeds)}개 실험 예정 (통합 학습)")
+        print(f"📋 순차 실행 모드")
+        print(f"🔄 통합 학습: GPU 사용 (online policy for TD target)")
+        
+        results = []
+        t0 = time.time()
+
+        for seed in seeds:
+            print(f"\n🎲 SEED {seed} 시작")
+            for e in all_runs:
+                w2_str = ", ".join([format_w2_weight(w) for w in e['w2_weights']])
+                print(f"— {e['env_id']} | w2_weights=[{w2_str}] lr={e['lr']}")
+                
+                # 통합 학습 실행
+                print(f"  🔄 통합 학습 실행 중...")
+                r = run_unified_training(
+                    env_id=e['env_id'], seed=seed,
+                    w2_weights=e['w2_weights'],
+                    lr=e['lr'],
+                    max_steps=max_steps, eval_freq=eval_freq,
+                    split_ratio=split_ratio,
+                    root_dir=root_dir, pyexec=pyexec
+                )
+                r['config_file'] = config_path.name  # config 파일 이름 추가
+                results.append(r)
+                print(f"  ✅ 통합 학습 완료: {r['status']}")
+                
+                print(f"✅ {e['env_id']} seed={seed} 완료")
+
+        all_results.extend(results)
+        
+        mins = (time.time() - t0) / 60.0
+        print(f"\n✅ Config {config_idx}/{len(config_files)} 완료 | 소요 시간: {mins:.1f}분")
+    
+    # 전체 결과 저장
     ts = now_str().replace(':','-')
     out_dir = Path(f"results_{ts}")
     out_dir.mkdir(exist_ok=True)
     
     # JSON 저장
-    write_json(out_dir / "unified_summary.json", results)
+    write_json(out_dir / "unified_summary.json", all_results)
 
     # CSV 저장
     csv_file = out_dir / "unified_results.csv"
     with csv_file.open('w', encoding='utf-8') as f:
-        f.write("env,seed,experiment_type,status,rc,err,duration_min,log,checkpoint_dir\n")
-        for r in results:
-            f.write(f"{r.get('env','')},{r.get('seed','')},{r.get('experiment_type','')},"
+        f.write("config_file,env,seed,experiment_type,status,rc,err,duration_min,log,checkpoint_dir\n")
+        for r in all_results:
+            f.write(f"{r.get('config_file','')},{r.get('env','')},{r.get('seed','')},{r.get('experiment_type','')},"
                     f"{r.get('status','')},{r.get('rc','')},{r.get('err','')},"
                     f"{r.get('duration_min','')},{r.get('log','')},{r.get('checkpoint_dir','')}\n")
 
-    mins = (time.time() - t0) / 60.0
-    print("\n🏁 완료 | 총 소요 {:.1f}분 | 결과: {}".format(mins, out_dir))
-    print(f"📊 통합 학습 결과: {csv_file}")
+    total_mins = (time.time() - total_t0) / 60.0
+    print(f"\n{'='*60}")
+    print(f"🏁 모든 config 파일 실행 완료 | 총 소요 시간: {total_mins:.1f}분")
+    print(f"📊 결과 저장 위치: {out_dir}")
+    print(f"📄 CSV 파일: {csv_file}")
+    print(f"{'='*60}")
 
 if __name__ == "__main__":
     main()
